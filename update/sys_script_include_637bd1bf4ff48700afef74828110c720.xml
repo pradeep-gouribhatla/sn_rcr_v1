@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_snc_sn_rcr_v1.MarkExistingNew</api_name>
+        <client_callable>false</client_callable>
+        <description/>
+        <name>MarkExistingNew</name>
+        <script><![CDATA[var MarkExistingNew = Class.create();
+MarkExistingNew.prototype = {
+initialize: function() {
+	},
+	
+	processBatchFiles: function(fileArray){
+// 		gs.log(' asdfsad '+fileArray);
+		var changeMap={};
+		for(var file in fileArray){
+			var linePerFile = this.getChangedLines(fileArray[file]);
+			if(linePerFile && linePerFile.length > 0){
+				changeMap[fileArray[file]] = linePerFile;				
+			}
+		}
+		return changeMap;
+	},
+	processReivewResults: function(){
+		
+		var gr = new GlideAggregate('x_snc_rcr_review_results'),sysIdMap = {};
+			gr.addQuery('is_latest',true);
+			gr.addEncodedQuery('rule=NULL');
+			gr.groupBy('file_sys_id');
+			
+			gr.query();
+			while(gr.next()){
+				if( !gr.getDisplayValue('file_sys_id') || gr.getDisplayValue('file_sys_id') != ''){
+					sysIdMap[gr.file_sys_id.toString()] = gr.getDisplayValue('file_sys_id');
+				}
+			}
+			
+			this.processFileVersions(sysIdMap);
+		},
+		
+		processFileVersions: function(sysIdMap){
+			var lines = [];
+			for(var sysId in sysIdMap){
+				lines = this.getChangedLines(sysId);
+				
+				lines = this.processLineNumbers(lines);
+				gs.info('changes lines for '+ sysId + ' are '+lines);
+				var results = new GlideRecord('x_snc_rcr_review_results');
+				results.addQuery('file_sys_id',sysId);
+				results.addQuery('is_latest',true);
+				results.addEncodedQuery('rule!=0bb89386db4a760043abfd441d9619a7^ORrule=NULL');
+				results.query();
+				while(results.next()){
+					if (lines.indexOf(0) != -1){ // new file for review. all errors are new.
+							results.newly_introduced = true;						
+					}else{
+						var lineno = results.line_number;
+						if(lines.indexOf(lineno) == -1){
+							results.newly_introduced = false;
+						}else{
+							results.newly_introduced = true;
+						}
+					}
+				results.update();
+				}
+			}
+		},
+		
+		calculateLineNo: function(comment){
+			var colonTokens = comment.split(':');
+			var spaceTokens = colonTokens[0].split(' ');
+			
+			return spaceTokens[1];
+		},
+		
+		processLineNumbers: function(lines){
+			for(var line in lines){
+				lines[line] = parseInt(lines[line]);
+			}
+			return lines;
+		},
+		
+		findValues: function(obj, key) {
+			return this.findValuesHelper(obj, key, []);
+		},
+		
+		findValuesHelper : function(obj, key, list) {
+			if (!obj) return list;
+				if (obj instanceof Array) {
+				for (var i in obj) {
+					list = list.concat(this.findValuesHelper(obj[i], key, []));
+				}
+				return list;
+			}
+			if (obj[key]) list.push(obj[key]);
+				
+			if ((typeof obj == "object") && (obj !== null)) {
+				var children = Object.keys(obj);
+				if (children.length > 0) {
+					for (var j = 0; j < children.length; j++) {
+						list = list.concat(this.findValuesHelper(obj[children[j]], key, []));
+					}
+				}
+			}
+			return list;
+		},
+		
+		/* returns array of changed lines or 0 if all the lines are new.
+ 		*/
+		
+		getChangedLines : function(fileSysId, updateSet) {
+			var result = [];
+			if (!fileSysId)
+				return result;
+			
+			var versionMap = this.getLastUpdatesetVersion(fileSysId, updateSet);
+			//      gs.info('got the map '+ versionMap.currentVersionUnderReview +'   '+versionMap.oldVersionToCompare)
+			if(versionMap.currentVersionUnderReview && versionMap.oldVersionToCompare){
+				var codeArray = this.getCodes([versionMap.currentVersionUnderReview, versionMap.oldVersionToCompare]);
+				return this.generateDiff(codeArray);
+			}
+			else if(versionMap.currentVersionUnderReview && !versionMap.oldVersionToCompare){return 'newFile';
+			}else{
+				return result;
+			}
+			
+		},
+		
+		getLastUpdatesetVersion : function(fileSysId, UPSunderReview) {
+			
+			if (!fileSysId)
+				return;
+			
+			var versions = new GlideRecord('sys_update_version');
+			var encodeQuery = 'nameLIKE' + fileSysId + '^ORDERBYDESCsys_created_on';
+			versions.addEncodedQuery(encodeQuery);
+			//    versions.groupBy('source');
+			versions.query();
+			
+			var givenUpdateSet = UPSunderReview;
+			var updateSetFound = false;
+			// var targetVersionToCompare;
+			
+			var versionMap = {currentVersionUnderReview: '', oldVersionToCompare: ''};
+				
+				while (versions.next()) {
+					//         gs.info(versions.name + '  ' + versions.sys_id + '   ' + versions.source)
+					
+					
+					if (UPSunderReview) {
+						if (updateSetFound) {
+							if (versions.source != givenUpdateSet) {
+								versionMap.oldVersionToCompare = versions.sys_id.toString();
+								break;
+							}
+						}
+						
+						if (!updateSetFound && givenUpdateSet == versions.source.toString()) {
+							versionMap.currentVersionUnderReview = versions.sys_id.toString();
+							updateSetFound = true;
+						}
+					}else{
+						
+						if(!givenUpdateSet){
+							givenUpdateSet = versions.source.toString();
+							versionMap.currentVersionUnderReview = versions.sys_id.toString();
+						}
+						
+						if(givenUpdateSet != versions.source){
+							versionMap.oldVersionToCompare = versions.sys_id.toString();
+							break;
+						}
+						
+					}
+					
+				}
+				return versionMap;
+			},
+			
+			getCodes : function (versionArray) {
+				var codeArray = [];
+				var exceptionOccured = false;
+				var table = "sys_update_version";
+				try{
+					for (var version in versionArray) {
+						//         gs.info('in loop '+versionArray[version])
+						var versionRecord = new GlideRecord(table);
+						versionRecord.get(versionArray[version]);
+						
+						var codePayload = gs.xmlToJSON(versionRecord.payload);
+// 						gs.log(' codePayload '+ codePayload);
+						var script = this.findValues(codePayload, 'script', []);
+						codeArray.push(script[0]);
+						// gs.info('got code.');
+						
+					}
+					
+				}catch(e){
+					gs.error('xml conversion error occured for file versions '+ versionArray);
+					exceptionOccured = true;
+				}
+				
+				finally{
+					if(exceptionOccured){
+						gs.info('exception occured H002');
+					}
+					return codeArray;
+				}
+				if(exceptionOccured){
+					gs.info('exception occured H001');
+				}
+				
+			},
+			
+			
+			generateDiff : function(codeArray) {
+				
+				var df = new global.Differ();
+				var _diff = df.diff(codeArray[0], codeArray[1], 'SCRIPT', true);
+				var diffJSON = gs.xmlToJSON(_diff);
+				
+				var lines = "";
+				
+				var rows = [];
+				if(diffJSON && diffJSON.tbody && diffJSON.tbody.tr){
+					rows = diffJSON.tbody.tr;
+				}
+
+				for (var row in rows) {
+					var tds = null;
+					if(rows[row] && rows[row].td){
+						tds = rows[row].td;
+					}
+					//gs.print(JSON.stringify(rows[row]))
+					if (tds && tds[3] && tds[3]['class'] != 'equal') {
+						// gs.print(tds[1]['class'] + '  ' + tds[1]['content'] + '    ' + tds[0]['content'] + '   ' + tds[3]['class'] + '  ' + tds[3]['content'] + '  ' + tds[2]['content'])
+						var lineNumber = tds[0]['content']?tds[0]['content'].split(":")[0]: "";
+						if(lineNumber){
+							lines = lines + lineNumber + ",";
+						}
+					}
+					
+				}
+				return (lines && lines.length>0)?lines.slice(0,lines.length-2):"";
+				
+			},
+
+    type: 'MarkExistingNew'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>ranjeeta</sys_created_by>
+        <sys_created_on>2017-09-01 07:18:50</sys_created_on>
+        <sys_customer_update>true</sys_customer_update>
+        <sys_id>637bd1bf4ff48700afef74828110c720</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>MarkExistingNew</sys_name>
+        <sys_package display_value="sn_rcr_v1" source="x_snc_sn_rcr_v1">14191d3f4ff48700afef74828110c799</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_replace_on_upgrade>false</sys_replace_on_upgrade>
+        <sys_scope display_value="sn_rcr_v1">14191d3f4ff48700afef74828110c799</sys_scope>
+        <sys_update_name>sys_script_include_637bd1bf4ff48700afef74828110c720</sys_update_name>
+        <sys_updated_by>ranjeeta</sys_updated_by>
+        <sys_updated_on>2017-09-01 07:18:50</sys_updated_on>
+    </sys_script_include>
+</record_update>
